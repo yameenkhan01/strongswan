@@ -203,6 +203,7 @@ ENUM(xfrm_attr_type_names, XFRMA_UNSPEC, __XFRMA_MAX,
 	"XFRMA_IF_ID",
 	"XFRMA_MTIMER_THRESH",
 	"XFRMA_SA_DIR",
+	"XFRMA_SA_PCPU",
 	"XFRMA_MAX",
 );
 
