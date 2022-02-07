@@ -345,6 +345,9 @@ enum child_cfg_option_t {
 
 	/** Disable copying the ECN header field in tunnel mode */
 	OPT_NO_COPY_ECN = (1<<8),
+
+	/** Enable automatic forwarding of certain ICMP errors */
+	OPT_FORWARD_ICMP = (1<<9),
 };
 
 /**
