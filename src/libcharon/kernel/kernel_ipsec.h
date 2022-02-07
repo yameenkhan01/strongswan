@@ -105,6 +105,8 @@ struct kernel_ipsec_add_sa_t {
 	bool copy_ecn;
 	/** Whether to copy the DSCP header field to/from the outer header */
 	dscp_copy_t copy_dscp;
+	/** Whether to automatically forward certain ICMP error messages */
+	bool forward_icmp;
 	/** TRUE if initiator of the exchange creating the SA */
 	bool initiator;
 	/** TRUE if this is an inbound SA */
