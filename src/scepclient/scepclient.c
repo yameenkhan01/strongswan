@@ -377,9 +377,6 @@ static void usage(const char *message)
 		"                                   <algo> = aes128 (default) | aes192 | aes256 | 3des\n"
 		"                                   <algo> = sha256 (default) | sha384 | sha512 | sha1\n"
 		"\n"
-		"Options for CA certificate acquisition:\n"
-		" --caname (-c) <name>              name of CA to fetch CA certificate(s)\n"
-		"                                   (default: CAIdentifier)\n"
 		"Options for enrollment (cert):\n"
 		" --url (-u) <url>                  url of the SCEP server\n"
 		" --method (-m) post | get          http request type\n"
@@ -391,6 +388,141 @@ static void usage(const char *message)
 		" --debug (-l) <level>              changes the log level (-1..4, default: 1)\n"
 		);
 	exit_scepclient(message);
+}
+
+static void get_ca_cert(char *scep_url, char *file_out_ca_cert, bool force)
+{
+	char ca_path[PATH_MAX];
+	container_t *container;
+	pkcs7_t *p7;
+
+	if (!scep_http_request(scep_url, chunk_empty, SCEP_GET_CA_CERT, TRUE,
+						   http_timeout, http_bind, &scep_response))
+	{
+		exit_scepclient("did not receive a valid scep response");
+	}
+
+	join_paths(ca_path, sizeof(ca_path), CA_CERT_PATH, file_out_ca_cert);
+
+	p7 = lib->creds->create(lib->creds, CRED_CONTAINER, CONTAINER_PKCS7,
+							BUILD_BLOB_ASN1_DER, scep_response, BUILD_END);
+
+	if (!p7)
+	{	/* no PKCS#7 encoded CA+RA certificates, assume simple CA cert */
+
+		DBG1(DBG_APP, "unable to parse PKCS#7, assuming plain CA cert");
+		if (!chunk_write(scep_response, ca_path, 0022, force))
+		{
+			exit_scepclient("could not write ca cert file '%s': %s",
+							ca_path, strerror(errno));
+		}
+	}
+	else
+	{
+		enumerator_t *enumerator;
+		certificate_t *cert;
+		int ra_certs = 0, ca_certs = 0;
+		int ra_index = 1, ca_index = 1;
+
+		enumerator = p7->create_cert_enumerator(p7);
+		while (enumerator->enumerate(enumerator, &cert))
+		{
+			x509_t *x509 = (x509_t*)cert;
+			if (x509->get_flags(x509) & X509_CA)
+			{
+				ca_certs++;
+			}
+			else
+			{
+				ra_certs++;
+			}
+		}
+		enumerator->destroy(enumerator);
+
+		enumerator = p7->create_cert_enumerator(p7);
+		while (enumerator->enumerate(enumerator, &cert))
+		{
+			x509_t *x509 = (x509_t*)cert;
+			bool ca_cert = x509->get_flags(x509) & X509_CA;
+			char cert_path[PATH_MAX], *path = ca_path;
+
+			if (ca_cert && ca_certs > 1)
+			{
+				add_path_suffix(cert_path, sizeof(cert_path), ca_path,
+								"-%.1d", ca_index++);
+				path = cert_path;
+			}
+			else if (!ca_cert)
+			{	/* use CA name as base for RA certs */
+				if (ra_certs > 1)
+				{
+					add_path_suffix(cert_path, sizeof(cert_path), ca_path,
+									"-ra-%.1d", ra_index++);
+				}
+				else
+				{
+					add_path_suffix(cert_path, sizeof(cert_path), ca_path,
+									"-ra");
+				}
+				path = cert_path;
+			}
+
+			if (!cert->get_encoding(cert, CERT_ASN1_DER, &encoding) ||
+				!chunk_write(encoding, path, 0022, force))
+			{
+				exit_scepclient("could not write cert file '%s': %s",
+								path, strerror(errno));
+			}
+			DBG1(DBG_APP, "%s cert \"%Y\" written to '%s'",
+				 ca_cert ? "CA" : "RA", cert->get_subject(cert), path);
+
+			/* output SHA256 and SHA1 fingerpirnts for the root CA certificate */
+			if (ca_cert && (x509->get_flags(x509) & X509_SELF_SIGNED))
+			{
+				char digest_buf[HASH_SIZE_SHA256];
+				char base64_buf[HASH_SIZE_SHA256];
+				chunk_t cert_digest = {digest_buf, HASH_SIZE_SHA256};
+				chunk_t cert_id;
+				hasher_t *hasher;
+
+				/* SHA256 certificate digest */
+				hasher = lib->crypto->create_hasher(lib->crypto, HASH_SHA256);
+				if (!hasher)
+				{
+					exit_scepclient("could not create SHA256 hasher");
+				}
+				if (!hasher->get_hash(hasher, encoding, digest_buf))
+				{
+					hasher->destroy(hasher);
+					exit_scepclient("could not compute SHA256 hash");
+				}
+				hasher->destroy(hasher);
+				DBG1(DBG_APP, "   SHA256: %#B", &cert_digest);
+
+				/* SHA1 certificate digest */
+				hasher = lib->crypto->create_hasher(lib->crypto, HASH_SHA1);
+				if (!hasher)
+				{
+					exit_scepclient("could not create SHA1 hasher");
+				}
+				if (!hasher->get_hash(hasher, encoding, digest_buf))
+				{
+					hasher->destroy(hasher);
+					exit_scepclient("could not compute SHA1 hash");
+				}
+				hasher->destroy(hasher);
+				cert_digest.len = HASH_SIZE_SHA1;
+				cert_id = chunk_to_base64(cert_digest, base64_buf);
+				DBG1(DBG_APP, "   SHA1  : %#B (%.*s)",
+					 &cert_digest, cert_id.len-1, cert_id.ptr);
+			}
+			chunk_free(&encoding);
+		}
+		enumerator->destroy(enumerator);
+		container = &p7->container;
+		container->destroy(container);
+	}
+	exit_scepclient(NULL); /* no further output required */
 }
 
 /**
@@ -470,9 +602,6 @@ int main(int argc, char **argv)
 
 	/* URL of the SCEP-Server */
 	char *scep_url = NULL;
-
-	/* Name of CA to fetch CA certs for */
-	char *ca_name = "CAIdentifier";
 
 	/* http request method, default is GET */
 	bool http_get_request = TRUE;
@@ -797,10 +926,6 @@ int main(int argc, char **argv)
 				scep_url = optarg;
 				continue;
 
-			case 'c':       /* -- caname */
-				ca_name = optarg;
-				continue;
-
 			case 'm':       /* --method */
 				if (strcaseeq("get", optarg))
 				{
@@ -932,98 +1057,7 @@ int main(int argc, char **argv)
 	/* get CA cert */
 	if (request_ca_certificate)
 	{
-		char ca_path[PATH_MAX];
-		container_t *container;
-		pkcs7_t *p7;
-
-		if (!scep_http_request(scep_url, chunk_create(ca_name, strlen(ca_name)),
-							   SCEP_GET_CA_CERT, http_get_request,
-							   http_timeout, http_bind, &scep_response))
-		{
-			exit_scepclient("did not receive a valid scep response");
-		}
-
-		join_paths(ca_path, sizeof(ca_path), CA_CERT_PATH, file_out_ca_cert);
-
-		p7 = lib->creds->create(lib->creds, CRED_CONTAINER, CONTAINER_PKCS7,
-								BUILD_BLOB_ASN1_DER, scep_response, BUILD_END);
-
-		if (!p7)
-		{	/* no PKCS#7 encoded CA+RA certificates, assume simple CA cert */
-
-			DBG1(DBG_APP, "unable to parse PKCS#7, assuming plain CA cert");
-			if (!chunk_write(scep_response, ca_path, 0022, force))
-			{
-				exit_scepclient("could not write ca cert file '%s': %s",
-								ca_path, strerror(errno));
-			}
-		}
-		else
-		{
-			enumerator_t *enumerator;
-			certificate_t *cert;
-			int ra_certs = 0, ca_certs = 0;
-			int ra_index = 1, ca_index = 1;
-
-			enumerator = p7->create_cert_enumerator(p7);
-			while (enumerator->enumerate(enumerator, &cert))
-			{
-				x509_t *x509 = (x509_t*)cert;
-				if (x509->get_flags(x509) & X509_CA)
-				{
-					ca_certs++;
-				}
-				else
-				{
-					ra_certs++;
-				}
-			}
-			enumerator->destroy(enumerator);
-
-			enumerator = p7->create_cert_enumerator(p7);
-			while (enumerator->enumerate(enumerator, &cert))
-			{
-				x509_t *x509 = (x509_t*)cert;
-				bool ca_cert = x509->get_flags(x509) & X509_CA;
-				char cert_path[PATH_MAX], *path = ca_path;
-
-				if (ca_cert && ca_certs > 1)
-				{
-					add_path_suffix(cert_path, sizeof(cert_path), ca_path,
-									"-%.1d", ca_index++);
-					path = cert_path;
-				}
-				else if (!ca_cert)
-				{	/* use CA name as base for RA certs */
-					if (ra_certs > 1)
-					{
-						add_path_suffix(cert_path, sizeof(cert_path), ca_path,
-										"-ra-%.1d", ra_index++);
-					}
-					else
-					{
-						add_path_suffix(cert_path, sizeof(cert_path), ca_path,
-										"-ra");
-					}
-					path = cert_path;
-				}
-
-				if (!cert->get_encoding(cert, CERT_ASN1_DER, &encoding) ||
-					!chunk_write(encoding, path, 0022, force))
-				{
-					exit_scepclient("could not write cert file '%s': %s",
-									path, strerror(errno));
-				}
-				DBG1(DBG_APP, "%s cert \"%Y\" written to '%s'",
-					 ca_cert ? "CA" : "RA", cert->get_subject(cert), path);
-				}
-				chunk_free(&encoding);
-			}
-			enumerator->destroy(enumerator);
-			container = &p7->container;
-			container->destroy(container);
-		}
-		exit_scepclient(NULL); /* no further output required */
+		get_ca_cert(scep_url, file_out_ca_cert, force);
 	}
 
 	creds = mem_cred_create();
@@ -1311,6 +1345,8 @@ int main(int argc, char **argv)
 		container_t *container = NULL;
 		chunk_t chunk;
 		scep_attributes_t attrs = empty_scep_attributes;
+		certificate_t *x509_ca_root = NULL;
+		char file_in_cacert_root[] = "myca-1.der";
 
 		join_paths(path, sizeof(path), CA_CERT_PATH, file_in_cacert_sig);
 
@@ -1322,6 +1358,17 @@ int main(int argc, char **argv)
 		}
 
 		creds->add_cert(creds, TRUE, x509_ca_sig->get_ref(x509_ca_sig));
+
+		join_paths(path, sizeof(path), CA_CERT_PATH, file_in_cacert_root);
+
+		x509_ca_root = lib->creds->create(lib->creds, CRED_CERTIFICATE, CERT_X509,
+										 BUILD_FROM_FILE, path, BUILD_END);
+		if (!x509_ca_root)
+		{
+			exit_scepclient("could not load root cacert file '%s'", path);
+		}
+
+		creds->add_cert(creds, TRUE, x509_ca_root->get_ref(x509_ca_root));
 
 		if (!scep_http_request(scep_url, pkcs7, SCEP_PKI_OPERATION,
 					http_get_request, http_timeout, http_bind, &scep_response))
