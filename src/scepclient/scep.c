@@ -374,7 +374,6 @@ bool scep_http_request(const char *url, chunk_t msg, scep_op_t op,
 			free(escaped_req);
 
 			status = lib->fetcher->fetch(lib->fetcher, complete_url, response,
-										 FETCH_HTTP_VERSION_1_0,
 										 FETCH_TIMEOUT, timeout,
 										 FETCH_REQUEST_HEADER, "Pragma:",
 										 FETCH_REQUEST_HEADER, "Host:",
@@ -390,7 +389,6 @@ bool scep_http_request(const char *url, chunk_t msg, scep_op_t op,
 			snprintf(complete_url, len, "%s?operation=%s", url, operation);
 
 			status = lib->fetcher->fetch(lib->fetcher, complete_url, response,
-										 FETCH_HTTP_VERSION_1_0,
 										 FETCH_TIMEOUT, timeout,
 										 FETCH_REQUEST_DATA, msg,
 										 FETCH_REQUEST_TYPE, "",
@@ -416,11 +414,9 @@ bool scep_http_request(const char *url, chunk_t msg, scep_op_t op,
 		/* form complete url */
 		len = strlen(url) + 32 + strlen(operation) + msg.len + 1;
 		complete_url = malloc(len);
-		snprintf(complete_url, len, "%s?operation=%s&message=%.*s",
-				 url, operation, (int)msg.len, msg.ptr);
+		snprintf(complete_url, len, "%s?operation=%s", url, operation);
 
 		status = lib->fetcher->fetch(lib->fetcher, complete_url, response,
-									 FETCH_HTTP_VERSION_1_0,
 									 FETCH_TIMEOUT, timeout,
 									 FETCH_SOURCEIP, srcip,
 									 FETCH_END);
