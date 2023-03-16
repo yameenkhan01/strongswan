@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2006-2020 Tobias Brunner
+ * Copyright (C) 2006-2023 Tobias Brunner
  * Copyright (C) 2006 Daniel Roethlisberger
  * Copyright (C) 2005-2009 Martin Willi
  * Copyright (C) 2005 Jan Hutter
@@ -174,6 +174,11 @@ enum ike_extension_t {
 	 * IKEv2 Intermediate Exchange, RFC 9242
 	 */
 	EXT_IKE_INTERMEDIATE = (1<<17),
+
+	/**
+	 * Peer supports optimized rekeying, draft-ietf-ipsecme-ikev2-sa-ts-payloads-opt
+	 */
+	EXT_OPTIMIZED_REKEY = (1<<18),
 };
 
 /**
