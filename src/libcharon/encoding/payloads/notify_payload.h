@@ -170,6 +170,11 @@ enum notify_type_t {
 	/* multiple key exchanges, RFC 9370 */
 	ADDITIONAL_KEY_EXCHANGE = 16441,
 
+	/* Optimized rekeying supported (draft-ietf-ipsecme-ikev2-sa-ts-payloads-opt) */
+	OPTIMIZED_REKEY_SUPPORTED = 16443,
+	/* Optimized rekeying (draft-ietf-ipsecme-ikev2-sa-ts-payloads-opt) */
+	OPTIMIZED_REKEY = 16444,
+
 	/* IKEv1 initial contact */
 	INITIAL_CONTACT_IKEV1 = 24578,
 
