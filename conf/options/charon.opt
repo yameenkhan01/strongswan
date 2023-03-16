@@ -302,6 +302,9 @@ charon.nbns1
 charon.nbns2
 	WINS servers assigned to peer via configuration payload (CP).
 
+charon.optimized_rekeying = yes
+	Enable optimized rekeying that omits SA and TS payloads (RFC ...).
+
 charon.port = 500
 	UDP port used locally. If set to 0 a random port will be allocated.
 
