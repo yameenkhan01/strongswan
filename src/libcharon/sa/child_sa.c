@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2006-2019 Tobias Brunner
+ * Copyright (C) 2006-2023 Tobias Brunner
  * Copyright (C) 2016 Andreas Steffen
  * Copyright (C) 2005-2008 Martin Willi
  * Copyright (C) 2006 Daniel Roethlisberger
@@ -220,6 +220,11 @@ struct private_child_sa_t {
 	 * Specifies if UDP encapsulation is enabled (NAT traversal)
 	 */
 	bool encap;
+
+	/**
+	 * Whether optimized rekeying is supported for this CHILD_SA
+	 */
+	bool optimized_rekey;
 
 	/**
 	 * Specifies the IPComp transform used (IPCOMP_NONE if disabled)
@@ -452,6 +457,18 @@ METHOD(child_sa_t, set_ipcomp, void,
 	   private_child_sa_t *this, ipcomp_transform_t ipcomp)
 {
 	this->ipcomp = ipcomp;
+}
+
+METHOD(child_sa_t, get_optimized_rekey, bool,
+	private_child_sa_t *this)
+{
+	return this->optimized_rekey;
+}
+
+METHOD(child_sa_t, set_optimized_rekey, void,
+	private_child_sa_t *this, bool enabled)
+{
+	this->optimized_rekey = enabled;
 }
 
 METHOD(child_sa_t, set_close_action, void,
@@ -2041,6 +2058,8 @@ child_sa_t *child_sa_create(host_t *me, host_t *other, child_cfg_t *config,
 			.has_encap = _has_encap,
 			.get_ipcomp = _get_ipcomp,
 			.set_ipcomp = _set_ipcomp,
+			.get_optimized_rekey = _get_optimized_rekey,
+			.set_optimized_rekey = _set_optimized_rekey,
 			.get_close_action = _get_close_action,
 			.set_close_action = _set_close_action,
 			.get_dpd_action = _get_dpd_action,
