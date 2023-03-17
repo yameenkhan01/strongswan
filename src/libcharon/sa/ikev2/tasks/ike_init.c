@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2008-2020 Tobias Brunner
+ * Copyright (C) 2008-2023 Tobias Brunner
  * Copyright (C) 2005-2008 Martin Willi
  * Copyright (C) 2005 Jan Hutter
  *
@@ -143,6 +143,11 @@ struct private_ike_init_t {
 	 * Whether to follow IKEv2 redirects as per RFC 5685
 	 */
 	bool follow_redirects;
+
+	/**
+	 * Whether to use optimized rekeying
+	 */
+	bool optimized_rekeying;
 };
 
 /**
@@ -336,23 +341,21 @@ static bool send_use_ppk(private_ike_init_t *this)
 }
 
 /**
- * build the payloads for the message
+ * Add an SA payload to the message, either generated from configured proposals
+ * or returning the selected proposal.
+ *
+ * The optional SPI of the new SA is encoded during a rekeying.
+ *
+ * Returns TRUE if additional KEs are proposed.
  */
-static bool build_payloads(private_ike_init_t *this, message_t *message)
+static bool build_sa_payload(private_ike_init_t *this, ike_cfg_t *ike_cfg,
+							 uint64_t new_spi, message_t *message)
 {
 	sa_payload_t *sa_payload;
-	ke_payload_t *ke_payload;
-	nonce_payload_t *nonce_payload;
 	linked_list_t *proposal_list, *other_dh_groups;
-	ike_sa_id_t *id;
-	proposal_t *proposal;
 	enumerator_t *enumerator;
-	ike_cfg_t *ike_cfg;
+	proposal_t *proposal;
 	bool additional_ke = FALSE;
-
-	id = this->ike_sa->get_id(this->ike_sa);
-
-	ike_cfg = this->ike_sa->get_ike_cfg(this->ike_sa);
 
 	if (this->initiator)
 	{
@@ -361,11 +364,7 @@ static bool build_payloads(private_ike_init_t *this, message_t *message)
 		enumerator = proposal_list->create_enumerator(proposal_list);
 		while (enumerator->enumerate(enumerator, (void**)&proposal))
 		{
-			/* include SPI of new IKE_SA when we are rekeying */
-			if (this->old_sa)
-			{
-				proposal->set_spi(proposal, id->get_initiator_spi(id));
-			}
+			proposal->set_spi(proposal, new_spi);
 			/* move the selected DH group to the front of the proposal */
 			if (!proposal->promote_transform(proposal, KEY_EXCHANGE_METHOD,
 											 this->ke_method))
@@ -391,15 +390,47 @@ static bool build_payloads(private_ike_init_t *this, message_t *message)
 	}
 	else
 	{
-		if (this->old_sa)
-		{
-			/* include SPI of new IKE_SA when we are rekeying */
-			this->proposal->set_spi(this->proposal, id->get_responder_spi(id));
-		}
+		this->proposal->set_spi(this->proposal, new_spi);
 		sa_payload = sa_payload_create_from_proposal_v2(this->proposal);
 		additional_ke = proposal_has_additional_ke(this->proposal);
 	}
 	message->add_payload(message, (payload_t*)sa_payload);
+	return additional_ke;
+}
+
+/**
+ * build the payloads for the message
+ */
+static bool build_payloads(private_ike_init_t *this, message_t *message)
+{
+	ke_payload_t *ke_payload;
+	notify_payload_t *notify;
+	nonce_payload_t *nonce_payload;
+	ike_sa_id_t *id;
+	ike_cfg_t *ike_cfg;
+	uint64_t my_new_spi = 0;
+	bool additional_ke = FALSE;
+
+	id = this->ike_sa->get_id(this->ike_sa);
+	ike_cfg = this->ike_sa->get_ike_cfg(this->ike_sa);
+
+	if (this->old_sa)
+	{
+		my_new_spi = this->initiator ? id->get_initiator_spi(id)
+									 : id->get_responder_spi(id);
+	}
+
+	if (this->optimized_rekeying)
+	{
+		notify = notify_payload_create_from_protocol_and_type(PLV2_NOTIFY,
+													PROTO_IKE, OPTIMIZED_REKEY);
+		notify->set_ike_spi(notify, my_new_spi);
+		message->add_payload(message, (payload_t*)notify);
+	}
+	else
+	{
+		additional_ke = build_sa_payload(this, ike_cfg, my_new_spi, message);
+	}
 
 	ke_payload = ke_payload_create_from_key_exchange(PLV2_KEY_EXCHANGE,
 													 this->ke);
@@ -661,6 +692,7 @@ static void process_payloads(private_ike_init_t *this, message_t *message)
 	payload_t *payload;
 	ike_sa_id_t *id;
 	ke_payload_t *ke_pld = NULL;
+	uint64_t new_spi = 0;
 
 	enumerator = message->create_payload_enumerator(message);
 	while (enumerator->enumerate(enumerator, &payload))
@@ -692,6 +724,18 @@ static void process_payloads(private_ike_init_t *this, message_t *message)
 
 				switch (notify->get_notify_type(notify))
 				{
+					case OPTIMIZED_REKEY:
+						if (this->optimized_rekeying)
+						{
+							new_spi = notify->get_ike_spi(notify);
+							if (!new_spi)
+							{
+								DBG1(DBG_IKE, "received invalid %N notify, "
+									 "ignored", notify_type_names,
+									 OPTIMIZED_REKEY);
+							}
+						}
+						break;
 					case FRAGMENTATION_SUPPORTED:
 						this->ike_sa->enable_extension(this->ike_sa,
 													   EXT_IKE_FRAGMENTATION);
@@ -758,6 +802,38 @@ static void process_payloads(private_ike_init_t *this, message_t *message)
 		}
 	}
 	enumerator->destroy(enumerator);
+
+	if (this->optimized_rekeying)
+	{
+		if (new_spi)
+		{
+			/* when using optimized rekeying, we use the original proposal but
+			 * with the new SPI the peer supplied via notify */
+			if (this->proposal)
+			{
+				DBG1(DBG_IKE, "peer sent unexpected SA payload during "
+					 "optimized rekeying, ignored");
+				this->proposal->destroy(this->proposal);
+			}
+			this->proposal = this->old_sa->get_proposal(this->old_sa);
+			this->proposal = this->proposal->clone(this->proposal, 0);
+			this->proposal->set_spi(this->proposal, new_spi);
+		}
+		else
+		{
+			if (this->initiator)
+			{
+				DBG1(DBG_IKE, "peer didn't reply with expected %N notify,"
+					 "rekeying may fail", notify_type_names, OPTIMIZED_REKEY);
+			}
+			else
+			{
+				DBG2(DBG_IKE, "peer requested a regular rekeying, even though "
+					 "optimized rekeying is supported");
+			}
+			this->optimized_rekeying = FALSE;
+		}
+	}
 
 	if (this->proposal)
 	{
@@ -851,8 +927,15 @@ METHOD(task_t, build_i, status_t,
 	if (!this->ke)
 	{
 		if (this->old_sa &&
-			lib->settings->get_bool(lib->settings,
-								"%s.prefer_previous_dh_group", TRUE, lib->ns))
+			this->old_sa->supports_extension(this->old_sa,
+											 EXT_OPTIMIZED_REKEY))
+		{
+			this->optimized_rekeying = TRUE;
+		}
+		if (this->old_sa &&
+			(this->optimized_rekeying ||
+			 lib->settings->get_bool(lib->settings, "%s.prefer_previous_dh_group",
+									TRUE, lib->ns)))
 		{	/* reuse the DH group we used for the old IKE_SA when rekeying */
 			proposal_t *proposal;
 			uint16_t dh_group;
@@ -885,6 +968,12 @@ METHOD(task_t, build_i, status_t,
 	}
 	else if (this->ke->get_method(this->ke) != this->ke_method)
 	{	/* reset DH instance if group changed (INVALID_KE_PAYLOAD) */
+		if (this->optimized_rekeying)
+		{
+			DBG1(DBG_IKE, "peer rejected our DH group during optimized "
+				 "rekeying, switch to regular rekeying");
+			this->optimized_rekeying = FALSE;
+		}
 		this->ke->destroy(this->ke);
 		this->ke = this->keymat->keymat.create_ke(&this->keymat->keymat,
 												  this->ke_method);
@@ -980,6 +1069,12 @@ METHOD(task_t, process_r,  status_t,
 		}
 	}
 #endif /* ME */
+
+	if (this->old_sa &&
+		this->old_sa->supports_extension(this->old_sa, EXT_OPTIMIZED_REKEY))
+	{	/* we expect an optimized rekeying if both peers support it */
+		this->optimized_rekeying = TRUE;
+	}
 
 	process_payloads(this, message);
 
