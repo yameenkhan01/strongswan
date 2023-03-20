@@ -1507,6 +1507,8 @@ METHOD(task_t, build_i, status_t,
 	this->child_sa = child_sa_create(this->ike_sa->get_my_host(this->ike_sa),
 									 this->ike_sa->get_other_host(this->ike_sa),
 									 this->config, &this->child);
+	/* disable optimized rekeying for the CHILD_SA created during IKE_AUTH */
+	this->child_sa->set_optimized_rekey(this->child_sa, !no_ke);
 
 	/* check this after creating the object so that its destruction is detected
 	 * by controller and trap manager */
@@ -2097,6 +2099,8 @@ METHOD(task_t, build_r, status_t,
 	this->child_sa = child_sa_create(this->ike_sa->get_my_host(this->ike_sa),
 									 this->ike_sa->get_other_host(this->ike_sa),
 									 this->config, &this->child);
+	/* disable optimized rekeying for the CHILD_SA created during IKE_AUTH */
+	this->child_sa->set_optimized_rekey(this->child_sa, !ike_auth);
 
 	this->other_spi = this->proposal->get_spi(this->proposal);
 	if (!allocate_spi(this))
