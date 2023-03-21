@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2022 Tobias Brunner
+ * Copyright (C) 2009-2023 Tobias Brunner
  * Copyright (C) 2005-2007 Martin Willi
  * Copyright (C) 2005 Jan Hutter
  *
@@ -292,20 +292,13 @@ METHOD(task_t, build_i, status_t,
 	if (!this->child_create)
 	{
 		child_cfg_t *config;
-		proposal_t *proposal;
-		uint16_t dh_group;
 		uint32_t reqid;
 
 		config = this->child_sa->get_config(this->child_sa);
 		this->child_create = child_create_create(this->ike_sa,
 									config->get_ref(config), TRUE, NULL, NULL);
+		this->child_create->rekey_sa(this->child_create, this->child_sa);
 
-		proposal = this->child_sa->get_proposal(this->child_sa);
-		if (proposal->get_algorithm(proposal, KEY_EXCHANGE_METHOD,
-									&dh_group, NULL))
-		{	/* reuse the DH group negotiated previously */
-			this->child_create->use_dh_group(this->child_create, dh_group);
-		}
 		reqid = this->child_sa->get_reqid(this->child_sa);
 		this->child_create->use_reqid(this->child_create, reqid);
 		this->child_create->use_marks(this->child_create,
@@ -376,11 +369,35 @@ static void find_child(private_child_rekey_t *this, message_t *message)
 METHOD(task_t, process_r, status_t,
 	private_child_rekey_t *this, message_t *message)
 {
-	/* let the CHILD_CREATE task process the message */
-	this->child_create->task.process(&this->child_create->task, message);
+	child_cfg_t *config;
+	uint32_t reqid;
 
 	find_child(this, message);
 
+	if (this->child_sa)
+	{
+		/* configure everything during the first request of a rekeying */
+		if (message->get_exchange_type(message) == CREATE_CHILD_SA)
+		{
+			reqid = this->child_sa->get_reqid(this->child_sa);
+			this->child_create->use_reqid(this->child_create, reqid);
+			this->child_create->use_marks(this->child_create,
+						this->child_sa->get_mark(this->child_sa, TRUE).value,
+						this->child_sa->get_mark(this->child_sa, FALSE).value);
+			this->child_create->use_if_ids(this->child_create,
+						this->child_sa->get_if_id(this->child_sa, TRUE),
+						this->child_sa->get_if_id(this->child_sa, FALSE));
+			this->child_create->use_label(this->child_create,
+						this->child_sa->get_label(this->child_sa));
+			config = this->child_sa->get_config(this->child_sa);
+			this->child_create->set_config(this->child_create,
+										   config->get_ref(config));
+			this->child_create->rekey_sa(this->child_create, this->child_sa);
+		}
+
+		/* let the CHILD_CREATE task process the message */
+		this->child_create->task.process(&this->child_create->task, message);
+	}
 	return NEED_MORE;
 }
 
@@ -420,10 +437,8 @@ static bool actively_rekeying(private_child_rekey_t *this, bool *followup_sent)
 METHOD(task_t, build_r, status_t,
 	private_child_rekey_t *this, message_t *message)
 {
-	child_cfg_t *config;
 	child_sa_t *child_sa;
 	child_sa_state_t state = CHILD_INSTALLED;
-	uint32_t reqid;
 	bool is_collision, followup_sent = FALSE;
 
 	if (!this->child_sa)
@@ -450,19 +465,6 @@ METHOD(task_t, build_r, status_t,
 
 	if (message->get_exchange_type(message) == CREATE_CHILD_SA)
 	{
-		reqid = this->child_sa->get_reqid(this->child_sa);
-		this->child_create->use_reqid(this->child_create, reqid);
-		this->child_create->use_marks(this->child_create,
-						this->child_sa->get_mark(this->child_sa, TRUE).value,
-						this->child_sa->get_mark(this->child_sa, FALSE).value);
-		this->child_create->use_if_ids(this->child_create,
-						this->child_sa->get_if_id(this->child_sa, TRUE),
-						this->child_sa->get_if_id(this->child_sa, FALSE));
-		this->child_create->use_label(this->child_create,
-						this->child_sa->get_label(this->child_sa));
-		config = this->child_sa->get_config(this->child_sa);
-		this->child_create->set_config(this->child_create,
-									   config->get_ref(config));
 		state = this->child_sa->get_state(this->child_sa);
 		this->child_sa->set_state(this->child_sa, CHILD_REKEYING);
 	}

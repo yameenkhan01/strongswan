@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018-2019 Tobias Brunner
+ * Copyright (C) 2018-2023 Tobias Brunner
  * Copyright (C) 2007 Martin Willi
  *
  * Copyright (C) secunet Security Networks AG
@@ -77,13 +77,12 @@ struct child_create_t {
 	void (*use_label)(child_create_t *this, sec_label_t *label);
 
 	/**
-	 * Initially propose a specific DH group to override configuration.
+	 * Use data from the given old SA (e.g. KE method) and possibly use
+	 * optimized rekeying if supported by the peer and CHILD_SA.
 	 *
-	 * This is used during rekeying to prefer the previously negotiated group.
-	 *
-	 * @param dh_group	DH group to use
+	 * @param old		old CHILD_SA that is getting rekeyed
 	 */
-	void (*use_dh_group)(child_create_t *this, key_exchange_method_t dh_group);
+	void (*rekey_sa)(child_create_t *this, child_sa_t *old);
 
 	/**
 	 * Get the lower of the two nonces, used for rekey collisions.

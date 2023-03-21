@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2008-2020 Tobias Brunner
+ * Copyright (C) 2008-2023 Tobias Brunner
  * Copyright (C) 2005-2008 Martin Willi
  * Copyright (C) 2005 Jan Hutter
  *
@@ -218,17 +218,22 @@ struct private_child_create_t {
 	child_sa_t *child_sa;
 
 	/**
-	 * successfully established the CHILD?
+	 * Successfully established the CHILD?
 	 */
 	bool established;
 
 	/**
-	 * whether the CHILD_SA rekeys an existing one
+	 * Whether the CHILD_SA rekeys an existing one
 	 */
 	bool rekey;
 
 	/**
-	 * whether we are retrying with another DH group
+	 * Whether to use optimized rekeying
+	 */
+	bool optimized_rekeying;
+
+	/**
+	 * Whether we are retrying with another DH group
 	 */
 	bool retry;
 };
@@ -316,20 +321,22 @@ static bool allocate_spi(private_child_create_t *this)
 {
 	proposal_t *proposal;
 
-	if (this->initiator)
+	if (!this->proto)
 	{
-		this->proto = PROTO_ESP;
-		/* we just get a SPI for the first protocol. TODO: If we ever support
-		 * proposal lists with mixed protocols, we'd need multiple SPIs */
-		if (this->proposals->get_first(this->proposals,
-									   (void**)&proposal) == SUCCESS)
+		if (this->initiator)
 		{
-			this->proto = proposal->get_protocol(proposal);
+			this->proto = PROTO_ESP;
+			/* we just get a SPI for the first protocol */
+			if (this->proposals->get_first(this->proposals,
+										   (void**)&proposal) == SUCCESS)
+			{
+				this->proto = proposal->get_protocol(proposal);
+			}
 		}
-	}
-	else
-	{
-		this->proto = this->proposal->get_protocol(this->proposal);
+		else
+		{
+			this->proto = this->proposal->get_protocol(this->proposal);
+		}
 	}
 	this->my_spi = this->child_sa->alloc_spi(this->child_sa, this->proto);
 	if (!this->my_spi)
@@ -880,8 +887,9 @@ static bool build_payloads_multi_ke(private_child_create_t *this,
  */
 static bool build_payloads(private_child_create_t *this, message_t *message)
 {
-	sa_payload_t *sa_payload;
+	notify_payload_t *notify;
 	nonce_payload_t *nonce_payload;
+	sa_payload_t *sa_payload;
 	ts_payload_t *ts_payload;
 	kernel_feature_t features;
 
@@ -889,16 +897,6 @@ static bool build_payloads(private_child_create_t *this, message_t *message)
 	{
 		return build_payloads_multi_ke(this, message);
 	}
-
-	if (this->initiator)
-	{
-		sa_payload = sa_payload_create_from_proposals_v2(this->proposals);
-	}
-	else
-	{
-		sa_payload = sa_payload_create_from_proposal_v2(this->proposal);
-	}
-	message->add_payload(message, (payload_t*)sa_payload);
 
 	/* add nonce payload if not in IKE_AUTH */
 	if (message->get_exchange_type(message) == CREATE_CHILD_SA)
@@ -918,15 +916,7 @@ static bool build_payloads(private_child_create_t *this, message_t *message)
 		return FALSE;
 	}
 
-	/* add TSi/TSr payloads */
-	ts_payload = ts_payload_create_from_traffic_selectors(TRUE, this->tsi,
-														  this->child.label);
-	message->add_payload(message, (payload_t*)ts_payload);
-	ts_payload = ts_payload_create_from_traffic_selectors(FALSE, this->tsr,
-														  this->child.label);
-	message->add_payload(message, (payload_t*)ts_payload);
-
-	/* add a notify if we are not in tunnel mode */
+	/* add a notify if we are not using tunnel mode */
 	switch (this->mode)
 	{
 		case MODE_TRANSPORT:
@@ -945,6 +935,36 @@ static bool build_payloads(private_child_create_t *this, message_t *message)
 		message->add_notify(message, FALSE, ESP_TFC_PADDING_NOT_SUPPORTED,
 							chunk_empty);
 	}
+
+	if (this->optimized_rekeying)
+	{
+		/* omit SA and TS payloads when using optimized rekeying, but send
+		 * an appropriate notify with our SPI */
+		notify = notify_payload_create_from_protocol_and_type(PLV2_NOTIFY,
+												this->proto, OPTIMIZED_REKEY);
+		notify->set_spi(notify, this->my_spi);
+		message->add_payload(message, (payload_t*)notify);
+		return TRUE;
+	}
+
+	if (this->initiator)
+	{
+		sa_payload = sa_payload_create_from_proposals_v2(this->proposals);
+	}
+	else
+	{
+		sa_payload = sa_payload_create_from_proposal_v2(this->proposal);
+	}
+	message->add_payload(message, (payload_t*)sa_payload);
+
+	/* add TSi/TSr payloads */
+	ts_payload = ts_payload_create_from_traffic_selectors(TRUE, this->tsi,
+														  this->child.label);
+	message->add_payload(message, (payload_t*)ts_payload);
+	ts_payload = ts_payload_create_from_traffic_selectors(FALSE, this->tsr,
+														  this->child.label);
+	message->add_payload(message, (payload_t*)ts_payload);
+
 	return TRUE;
 }
 
@@ -969,12 +989,23 @@ static void add_ipcomp_notify(private_child_create_t *this,
 }
 
 /**
- * handle a received notify payload
+ * Handle a received notify payload.
  */
 static void handle_notify(private_child_create_t *this, notify_payload_t *notify)
 {
 	switch (notify->get_notify_type(notify))
 	{
+		case OPTIMIZED_REKEY:
+			if (this->optimized_rekeying)
+			{
+				this->other_spi = notify->get_spi(notify);
+				if (!this->other_spi)
+				{
+					DBG1(DBG_IKE, "received invalid %N notify, ignored",
+						 notify_type_names, OPTIMIZED_REKEY);
+				}
+			}
+			break;
 		case USE_TRANSPORT_MODE:
 			this->mode = MODE_TRANSPORT;
 			break;
@@ -1207,9 +1238,15 @@ static void process_payloads(private_child_create_t *this, message_t *message)
 	payload_t *payload;
 	sa_payload_t *sa_payload;
 	ts_payload_t *ts_payload;
+	linked_list_t *proposals = NULL, *tsi = NULL, *tsr = NULL;
+	linked_list_t *labels_i = NULL, *labels_r = NULL;
+	proposal_t *proposal = NULL;
 
-	/* defaults to TUNNEL mode */
-	this->mode = MODE_TUNNEL;
+	if (!this->mode)
+	{
+		/* defaults to TUNNEL mode */
+		this->mode = MODE_TUNNEL;
+	}
 
 	enumerator = message->create_payload_enumerator(message);
 	while (enumerator->enumerate(enumerator, &payload))
@@ -1218,20 +1255,20 @@ static void process_payloads(private_child_create_t *this, message_t *message)
 		{
 			case PLV2_SECURITY_ASSOCIATION:
 				sa_payload = (sa_payload_t*)payload;
-				this->proposals = sa_payload->get_proposals(sa_payload);
+				proposals = sa_payload->get_proposals(sa_payload);
 				break;
 			case PLV2_KEY_EXCHANGE:
 				process_ke_payload(this, (ke_payload_t*)payload);
 				break;
 			case PLV2_TS_INITIATOR:
 				ts_payload = (ts_payload_t*)payload;
-				this->tsi = ts_payload->get_traffic_selectors(ts_payload);
-				this->labels_i = ts_payload->get_sec_labels(ts_payload);
+				tsi = ts_payload->get_traffic_selectors(ts_payload);
+				labels_i = ts_payload->get_sec_labels(ts_payload);
 				break;
 			case PLV2_TS_RESPONDER:
 				ts_payload = (ts_payload_t*)payload;
-				this->tsr = ts_payload->get_traffic_selectors(ts_payload);
-				this->labels_r = ts_payload->get_sec_labels(ts_payload);
+				tsr = ts_payload->get_traffic_selectors(ts_payload);
+				labels_r = ts_payload->get_sec_labels(ts_payload);
 				break;
 			case PLV2_NOTIFY:
 				handle_notify(this, (notify_payload_t*)payload);
@@ -1241,6 +1278,118 @@ static void process_payloads(private_child_create_t *this, message_t *message)
 		}
 	}
 	enumerator->destroy(enumerator);
+
+	if (this->optimized_rekeying)
+	{
+		if (this->other_spi)
+		{
+			/* when using optimized rekeying, we use the original proposal but
+			 * with the new SPI the peer supplied via notify */
+			this->proposals->get_first(this->proposals, (void**)&proposal);
+			proposal->set_spi(proposal, this->other_spi);
+
+			if (proposals)
+			{
+				DBG1(DBG_IKE, "peer sent unexpected SA payload during "
+					 "optimized rekeying, ignored");
+				proposals->destroy_offset(proposals,
+										  offsetof(proposal_t, destroy));
+			}
+			if (tsi || tsr || labels_i || labels_r)
+			{
+				DBG1(DBG_IKE, "peer sent unexpected TS payload(s) during "
+					 "optimized rekeying, ignored");
+			}
+			DESTROY_OFFSET_IF(tsi, offsetof(traffic_selector_t, destroy));
+			DESTROY_OFFSET_IF(tsr, offsetof(traffic_selector_t, destroy));
+			DESTROY_OFFSET_IF(labels_i, offsetof(sec_label_t, destroy));
+			DESTROY_OFFSET_IF(labels_r, offsetof(sec_label_t, destroy));
+		}
+		else
+		{
+			if (this->initiator)
+			{
+				DBG1(DBG_IKE, "peer didn't reply with expected %N notify,"
+					 "rekeying may fail", notify_type_names, OPTIMIZED_REKEY);
+			}
+			else
+			{
+				DBG2(DBG_IKE, "peer requested a regular rekeying, even though "
+					 "optimized rekeying is supported");
+			}
+			/* use regular rekeying */
+			DESTROY_OFFSET_IF(this->proposals, offsetof(proposal_t, destroy));
+			DESTROY_OFFSET_IF(this->tsi, offsetof(traffic_selector_t, destroy));
+			DESTROY_OFFSET_IF(this->tsr, offsetof(traffic_selector_t, destroy));
+			DESTROY_OFFSET_IF(this->labels_i, offsetof(sec_label_t, destroy));
+			DESTROY_OFFSET_IF(this->labels_r, offsetof(sec_label_t, destroy));
+			this->optimized_rekeying = FALSE;
+		}
+	}
+
+	if (!this->optimized_rekeying)
+	{
+		this->proposals = proposals;
+		this->tsi = tsi;
+		this->tsr = tsr;
+		this->labels_i = labels_i;
+		this->labels_r = labels_r;
+	}
+}
+
+/**
+ * Prepare proposed traffic selectors as initiator.
+ */
+static void prepare_proposed_ts(private_child_create_t *this)
+{
+	enumerator_t *enumerator;
+	peer_cfg_t *peer_cfg;
+	linked_list_t *list;
+	host_t *vip;
+
+	/* check if we want a virtual IP, but don't have one */
+	list = linked_list_create();
+	peer_cfg = this->ike_sa->get_peer_cfg(this->ike_sa);
+	if (!this->rekey)
+	{
+		enumerator = peer_cfg->create_virtual_ip_enumerator(peer_cfg);
+		while (enumerator->enumerate(enumerator, &vip))
+		{
+			/* propose a 0.0.0.0/0 or ::/0 subnet when we use virtual ip */
+			vip = host_create_any(vip->get_family(vip));
+			list->insert_last(list, vip);
+		}
+		enumerator->destroy(enumerator);
+	}
+	if (list->get_count(list))
+	{
+		this->tsi = this->config->get_traffic_selectors(this->config,
+														TRUE, NULL, list, TRUE);
+		list->destroy_offset(list, offsetof(host_t, destroy));
+	}
+	else
+	{	/* no virtual IPs configured */
+		list->destroy(list);
+		list = ike_sa_get_dynamic_hosts(this->ike_sa, TRUE);
+		this->tsi = this->config->get_traffic_selectors(this->config,
+														TRUE, NULL, list, TRUE);
+		list->destroy(list);
+	}
+	list = ike_sa_get_dynamic_hosts(this->ike_sa, FALSE);
+	this->tsr = this->config->get_traffic_selectors(this->config,
+													FALSE, NULL, list, TRUE);
+	list->destroy(list);
+
+	if (this->packet_tsi)
+	{
+		this->tsi->insert_first(this->tsi,
+								this->packet_tsi->clone(this->packet_tsi));
+	}
+	if (this->packet_tsr)
+	{
+		this->tsr->insert_first(this->tsr,
+								this->packet_tsr->clone(this->packet_tsr));
+	}
 }
 
 /**
@@ -1400,10 +1549,6 @@ METHOD(task_t, build_i_multi_ke, status_t,
 METHOD(task_t, build_i, status_t,
 	private_child_create_t *this, message_t *message)
 {
-	enumerator_t *enumerator;
-	host_t *vip;
-	peer_cfg_t *peer_cfg;
-	linked_list_t *list;
 	bool no_ke = TRUE;
 
 	switch (message->get_exchange_type(message))
@@ -1439,67 +1584,28 @@ METHOD(task_t, build_i, status_t,
 			return NEED_MORE;
 	}
 
-	/* check if we want a virtual IP, but don't have one */
-	list = linked_list_create();
-	peer_cfg = this->ike_sa->get_peer_cfg(this->ike_sa);
-	if (!this->rekey)
+	if (!this->optimized_rekeying)
 	{
-		enumerator = peer_cfg->create_virtual_ip_enumerator(peer_cfg);
-		while (enumerator->enumerate(enumerator, &vip))
-		{
-			/* propose a 0.0.0.0/0 or ::/0 subnet when we use virtual ip */
-			vip = host_create_any(vip->get_family(vip));
-			list->insert_last(list, vip);
+		prepare_proposed_ts(this);
+
+		if (!generic_label_only(this) && !this->child.label)
+		{	/* in the simple label mode we propose the configured label as we
+			 * won't have labels from acquires */
+			this->child.label = this->config->get_label(this->config);
+			if (this->child.label)
+			{
+				this->child.label = this->child.label->clone(this->child.label);
+			}
 		}
-		enumerator->destroy(enumerator);
-	}
-	if (list->get_count(list))
-	{
-		this->tsi = this->config->get_traffic_selectors(this->config,
-														TRUE, NULL, list, TRUE);
-		list->destroy_offset(list, offsetof(host_t, destroy));
-	}
-	else
-	{	/* no virtual IPs configured */
-		list->destroy(list);
-		list = ike_sa_get_dynamic_hosts(this->ike_sa, TRUE);
-		this->tsi = this->config->get_traffic_selectors(this->config,
-														TRUE, NULL, list, TRUE);
-		list->destroy(list);
-	}
-	list = ike_sa_get_dynamic_hosts(this->ike_sa, FALSE);
-	this->tsr = this->config->get_traffic_selectors(this->config,
-													FALSE, NULL, list, TRUE);
-	list->destroy(list);
-
-	if (this->packet_tsi)
-	{
-		this->tsi->insert_first(this->tsi,
-								this->packet_tsi->clone(this->packet_tsi));
-	}
-	if (this->packet_tsr)
-	{
-		this->tsr->insert_first(this->tsr,
-								this->packet_tsr->clone(this->packet_tsr));
-	}
-
-	if (!generic_label_only(this) && !this->child.label)
-	{	/* in the simple label mode we propose the configured label as we
-		 * won't have labels from acquires */
-		this->child.label = this->config->get_label(this->config);
 		if (this->child.label)
 		{
-			this->child.label = this->child.label->clone(this->child.label);
+			DBG2(DBG_CFG, "proposing security label '%s'",
+				 this->child.label->get_string(this->child.label));
 		}
-	}
-	if (this->child.label)
-	{
-		DBG2(DBG_CFG, "proposing security label '%s'",
-			 this->child.label->get_string(this->child.label));
-	}
 
-	this->proposals = this->config->get_proposals(this->config, no_ke);
-	this->mode = this->config->get_mode(this->config);
+		this->proposals = this->config->get_proposals(this->config, no_ke);
+		this->mode = this->config->get_mode(this->config);
+	}
 
 	this->child.if_id_in_def = this->ike_sa->get_if_id(this->ike_sa, TRUE);
 	this->child.if_id_out_def = this->ike_sa->get_if_id(this->ike_sa, FALSE);
@@ -1539,8 +1645,11 @@ METHOD(task_t, build_i, status_t,
 	}
 
 	if (!no_ke && !this->retry)
-	{	/* during a rekeying the method might already be set */
-		if (this->ke_method == KE_NONE)
+	{	/* during a rekeying the method is already set if one was negotiated
+		 * before, if not we try to propose one even during rekeying, unless we
+		 * use optimized rekeying of an SA without PFS */
+		if (this->ke_method == KE_NONE &&
+			!this->optimized_rekeying)
 		{
 			this->ke_method = this->config->get_algorithm(this->config,
 														  KEY_EXCHANGE_METHOD);
@@ -1589,13 +1698,16 @@ METHOD(task_t, build_i, status_t,
 		return FAILED;
 	}
 
-	this->tsi->destroy_offset(this->tsi, offsetof(traffic_selector_t, destroy));
-	this->tsr->destroy_offset(this->tsr, offsetof(traffic_selector_t, destroy));
-	this->proposals->destroy_offset(this->proposals, offsetof(proposal_t, destroy));
-	this->tsi = NULL;
-	this->tsr = NULL;
-	this->proposals = NULL;
-
+	/* keep the proposals and TS during an optimized rekeying */
+	if (!this->optimized_rekeying)
+	{
+		this->tsi->destroy_offset(this->tsi, offsetof(traffic_selector_t, destroy));
+		this->tsr->destroy_offset(this->tsr, offsetof(traffic_selector_t, destroy));
+		this->proposals->destroy_offset(this->proposals, offsetof(proposal_t, destroy));
+		this->tsi = NULL;
+		this->tsr = NULL;
+		this->proposals = NULL;
+	}
 	return NEED_MORE;
 }
 
@@ -2037,7 +2149,7 @@ METHOD(task_t, build_r, status_t,
 		return SUCCESS;
 	}
 
-	/* check if ike_config_t included non-critical error notifies */
+	/* check if ike_config_t task added non-critical error notifies */
 	enumerator = message->create_payload_enumerator(message);
 	while (enumerator->enumerate(enumerator, &payload))
 	{
@@ -2345,6 +2457,12 @@ METHOD(task_t, process_i, status_t,
 					DBG1(DBG_IKE, "peer didn't accept DH group %N, "
 						 "it requested %N", key_exchange_method_names,
 						 this->ke_method, key_exchange_method_names, alg);
+					if (this->optimized_rekeying)
+					{
+						DBG1(DBG_IKE, "peer rejected our DH group during "
+							 "optimized rekeying, switch to regular rekeying");
+						this->optimized_rekeying = FALSE;
+					}
 					this->retry = TRUE;
 					this->ke_method = alg;
 					this->child_sa->set_state(this->child_sa, CHILD_RETRYING);
@@ -2474,10 +2592,49 @@ METHOD(child_create_t, use_label, void,
 	this->child.label = label ? label->clone(label) : NULL;
 }
 
-METHOD(child_create_t, use_dh_group, void,
-	private_child_create_t *this, key_exchange_method_t dh_group)
+METHOD(child_create_t, rekey_sa, void,
+	private_child_create_t *this, child_sa_t *old)
 {
-	this->ke_method = dh_group;
+	proposal_t *proposal;
+	uint16_t ke_method;
+	linked_list_t *my_ts, *other_ts;
+
+	proposal = old->get_proposal(old);
+	if (proposal->get_algorithm(proposal, KEY_EXCHANGE_METHOD,
+								&ke_method, NULL))
+	{	/* reuse the KE method negotiated previously */
+		this->ke_method = ke_method;
+	}
+	if (old->get_optimized_rekey(old) &&
+		this->ike_sa->supports_extension(this->ike_sa,
+										 EXT_OPTIMIZED_REKEY))
+	{	/* with optimized rekeying we reuse the proposal and TS */
+		this->optimized_rekeying = TRUE;
+		proposal = proposal->clone(proposal, 0);
+		this->proposals = linked_list_create_with_items(proposal, NULL);
+		this->proto = old->get_protocol(old);
+		this->mode = old->get_mode(old);
+		my_ts = linked_list_create_from_enumerator(
+										old->create_ts_enumerator(old, TRUE));
+		other_ts = linked_list_create_from_enumerator(
+										old->create_ts_enumerator(old, FALSE));
+		if (this->initiator)
+		{
+			this->tsi = my_ts->clone_offset(my_ts,
+										offsetof(traffic_selector_t, clone));
+			this->tsr = other_ts->clone_offset(other_ts,
+										offsetof(traffic_selector_t, clone));
+		}
+		else
+		{
+			this->tsi = other_ts->clone_offset(other_ts,
+										offsetof(traffic_selector_t, clone));
+			this->tsr = my_ts->clone_offset(my_ts,
+										offsetof(traffic_selector_t, clone));
+		}
+		my_ts->destroy(my_ts);
+		other_ts->destroy(other_ts);
+	}
 }
 
 METHOD(child_create_t, get_child, child_sa_t*,
@@ -2525,21 +2682,18 @@ METHOD(task_t, migrate, void,
 	chunk_free(&this->my_nonce);
 	chunk_free(&this->other_nonce);
 	chunk_free(&this->link);
-	if (this->tsr)
+	if (!this->optimized_rekeying)
 	{
-		this->tsr->destroy_offset(this->tsr, offsetof(traffic_selector_t, destroy));
-	}
-	if (this->tsi)
-	{
-		this->tsi->destroy_offset(this->tsi, offsetof(traffic_selector_t, destroy));
-	}
-	if (this->labels_i)
-	{
-		this->labels_i->destroy_offset(this->labels_i, offsetof(sec_label_t, destroy));
-	}
-	if (this->labels_r)
-	{
-		this->labels_r->destroy_offset(this->labels_r, offsetof(sec_label_t, destroy));
+		DESTROY_OFFSET_IF(this->tsi, offsetof(traffic_selector_t, destroy));
+		DESTROY_OFFSET_IF(this->tsr, offsetof(traffic_selector_t, destroy));
+		DESTROY_OFFSET_IF(this->labels_i, offsetof(sec_label_t, destroy));
+		DESTROY_OFFSET_IF(this->labels_r, offsetof(sec_label_t, destroy));
+		this->tsi = NULL;
+		this->tsr = NULL;
+		DESTROY_OFFSET_IF(this->proposals, offsetof(proposal_t, destroy));
+		this->proposals = NULL;
+		this->proto = PROTO_NONE;
+		this->mode = MODE_TUNNEL;
 	}
 	DESTROY_IF(this->child_sa);
 	DESTROY_IF(this->proposal);
@@ -2547,10 +2701,6 @@ METHOD(task_t, migrate, void,
 	DESTROY_IF(this->ke);
 	this->ke_failed = FALSE;
 	clear_key_exchanges(this);
-	if (this->proposals)
-	{
-		this->proposals->destroy_offset(this->proposals, offsetof(proposal_t, destroy));
-	}
 	if (!this->rekey && !this->retry)
 	{
 		this->ke_method = KE_NONE;
@@ -2558,13 +2708,9 @@ METHOD(task_t, migrate, void,
 	this->ike_sa = ike_sa;
 	this->keymat = (keymat_v2_t*)ike_sa->get_keymat(ike_sa);
 	this->proposal = NULL;
-	this->proposals = NULL;
-	this->tsi = NULL;
-	this->tsr = NULL;
 	this->ke = NULL;
 	this->nonceg = NULL;
 	this->child_sa = NULL;
-	this->mode = MODE_TUNNEL;
 	this->ipcomp = IPCOMP_NONE;
 	this->ipcomp_received = IPCOMP_NONE;
 	this->other_cpi = 0;
@@ -2579,22 +2725,10 @@ METHOD(task_t, destroy, void,
 	chunk_free(&this->my_nonce);
 	chunk_free(&this->other_nonce);
 	chunk_free(&this->link);
-	if (this->tsr)
-	{
-		this->tsr->destroy_offset(this->tsr, offsetof(traffic_selector_t, destroy));
-	}
-	if (this->tsi)
-	{
-		this->tsi->destroy_offset(this->tsi, offsetof(traffic_selector_t, destroy));
-	}
-	if (this->labels_i)
-	{
-		this->labels_i->destroy_offset(this->labels_i, offsetof(sec_label_t, destroy));
-	}
-	if (this->labels_r)
-	{
-		this->labels_r->destroy_offset(this->labels_r, offsetof(sec_label_t, destroy));
-	}
+	DESTROY_OFFSET_IF(this->tsi, offsetof(traffic_selector_t, destroy));
+	DESTROY_OFFSET_IF(this->tsr, offsetof(traffic_selector_t, destroy));
+	DESTROY_OFFSET_IF(this->labels_i, offsetof(sec_label_t, destroy));
+	DESTROY_OFFSET_IF(this->labels_r, offsetof(sec_label_t, destroy));
 	if (!this->established)
 	{
 		DESTROY_IF(this->child_sa);
@@ -2604,10 +2738,7 @@ METHOD(task_t, destroy, void,
 	DESTROY_IF(this->proposal);
 	DESTROY_IF(this->ke);
 	clear_key_exchanges(this);
-	if (this->proposals)
-	{
-		this->proposals->destroy_offset(this->proposals, offsetof(proposal_t, destroy));
-	}
+	DESTROY_OFFSET_IF(this->proposals, offsetof(proposal_t, destroy));
 	DESTROY_IF(this->config);
 	DESTROY_IF(this->nonceg);
 	DESTROY_IF(this->child.label);
@@ -2633,7 +2764,7 @@ child_create_t *child_create_create(ike_sa_t *ike_sa,
 			.use_marks = _use_marks,
 			.use_if_ids = _use_if_ids,
 			.use_label = _use_label,
-			.use_dh_group = _use_dh_group,
+			.rekey_sa = _rekey_sa,
 			.task = {
 				.get_type = _get_type,
 				.migrate = _migrate,
