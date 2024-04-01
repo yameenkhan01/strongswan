@@ -232,14 +232,14 @@ oqs_kem_t *oqs_kem_create(key_exchange_method_t method)
 
 	switch (method)
 	{
-		case KE_KYBER_L1:
-			kem_alg = OQS_KEM_alg_kyber_512;
+		case ML_KEM_512:
+			kem_alg = OQS_KEM_alg_ml_kem_512;
 			break;
-		case KE_KYBER_L3:
-			kem_alg = OQS_KEM_alg_kyber_768;
+		case ML_KEM_768:
+			kem_alg = OQS_KEM_alg_ml_kem_768;
 			break;
-		case KE_KYBER_L5:
-			kem_alg = OQS_KEM_alg_kyber_1024;
+		case ML_KEM_1024:
+			kem_alg = OQS_KEM_alg_ml_kem_1024;
 			break;
 		case KE_BIKE_L1:
 			kem_alg = OQS_KEM_alg_bike_l1;

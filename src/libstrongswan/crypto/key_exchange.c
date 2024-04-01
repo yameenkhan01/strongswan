@@ -51,10 +51,10 @@ ENUM_NEXT(key_exchange_method_names, MODP_1024_160, CURVE_448, ECP_521_BIT,
 	"CURVE_448");
 ENUM_NEXT(key_exchange_method_names, MODP_NULL, MODP_NULL, CURVE_448,
 	"MODP_NULL");
-ENUM_NEXT(key_exchange_method_names, KE_KYBER_L1, KE_HQC_L5, MODP_NULL,
-	"KYBER_L1",
-	"KYBER_L3",
-	"KYBER_L5",
+ENUM_NEXT(key_exchange_method_names, ML_KEM_512, KE_HQC_L5, MODP_NULL,
+	"ML_KEM_512",
+	"ML_KEM_768",
+	"ML_KEM_1024",
 	"FRODO_AES_L1",
 	"FRODO_AES_L3",
 	"FRODO_AES_L5",
@@ -100,10 +100,10 @@ ENUM_NEXT(key_exchange_method_names_short, MODP_1024_160, CURVE_448, ECP_521_BIT
 	"curve448");
 ENUM_NEXT(key_exchange_method_names_short, MODP_NULL, MODP_NULL, CURVE_448,
 	"modpnull");
-ENUM_NEXT(key_exchange_method_names_short, KE_KYBER_L1, KE_HQC_L5, MODP_NULL,
-	"kyber1",
-	"kyber3",
-	"kyber5",
+ENUM_NEXT(key_exchange_method_names_short, ML_KEM_512, KE_HQC_L5, MODP_NULL,
+	"mlkem512",
+	"mlkem768",
+	"mlkem1024",
 	"frodoa1",
 	"frodoa3",
 	"frodoa5",
@@ -642,9 +642,9 @@ bool key_exchange_is_kem(key_exchange_method_t ke)
 {
 	switch (ke)
 	{
-		case KE_KYBER_L1:
-		case KE_KYBER_L3:
-		case KE_KYBER_L5:
+		case ML_KEM_512:
+		case ML_KEM_768:
+		case ML_KEM_1024:
 		case KE_FRODO_AES_L1:
 		case KE_FRODO_AES_L3:
 		case KE_FRODO_AES_L5:
@@ -717,9 +717,9 @@ bool key_exchange_verify_pubkey(key_exchange_method_t ke, chunk_t value)
 		case CURVE_448:
 			valid = value.len == 56;
 			break;
-		case KE_KYBER_L1:
-		case KE_KYBER_L3:
-		case KE_KYBER_L5:
+		case ML_KEM_512:
+		case ML_KEM_768:
+		case ML_KEM_1024:
 		case KE_FRODO_AES_L1:
 		case KE_FRODO_AES_L3:
 		case KE_FRODO_AES_L5:

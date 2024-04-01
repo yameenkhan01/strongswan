@@ -118,7 +118,7 @@ START_TEST(test_oqs_wrong)
 	}
 
 	/* test non-kem method */
-	if (method == KE_KYBER_L1)
+	if (method == ML_KEM_512)
 	{
 		ck_assert(!oqs_kem_create(CURVE_25519));
 	}
@@ -254,19 +254,19 @@ Suite *oqs_suite_create()
 
 	tc = tcase_create("good");
 	test_case_set_timeout(tc, 30);
-	tcase_add_loop_test(tc, test_oqs_good, KE_KYBER_L1, KE_HQC_L5 + 1);
+	tcase_add_loop_test(tc, test_oqs_good, ML_KEM_512, KE_HQC_L5 + 1);
 	suite_add_tcase(s, tc);
 
 	tc = tcase_create("wrong");
-	tcase_add_loop_test(tc, test_oqs_wrong, KE_KYBER_L1, KE_HQC_L5 + 1);
+	tcase_add_loop_test(tc, test_oqs_wrong, ML_KEM_512, KE_HQC_L5 + 1);
 	suite_add_tcase(s, tc);
 
 	tc = tcase_create("fail_i");
-	tcase_add_loop_test(tc, test_oqs_fail_i, KE_KYBER_L1, KE_HQC_L5 + 1);
+	tcase_add_loop_test(tc, test_oqs_fail_i, ML_KEM_512, KE_HQC_L5 + 1);
 	suite_add_tcase(s, tc);
 
 	tc = tcase_create("fail_r");
-	tcase_add_loop_test(tc, test_oqs_fail_r, KE_KYBER_L1, KE_HQC_L5 + 1);
+	tcase_add_loop_test(tc, test_oqs_fail_r, ML_KEM_512, KE_HQC_L5 + 1);
 	suite_add_tcase(s, tc);
 
 	return s;

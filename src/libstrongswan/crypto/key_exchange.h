@@ -67,11 +67,11 @@ enum key_exchange_method_t {
 	CURVE_25519   = 31,
 	CURVE_448     = 32,
 	/** insecure NULL diffie hellman group for testing, in PRIVATE USE */
-	MODP_NULL          = 1024,
-	/** NIST selected KEM algorithms 2022, in PRIVATE USE */
-	KE_KYBER_L1        = 1080,
-	KE_KYBER_L3        = 1081,
-	KE_KYBER_L5        = 1082,
+	MODP_NULL     = 1024,
+	/** NIST selected KEM algorithms 2022, currently still in PRIVATE USE */
+	ML_KEM_512    = 1080,
+	ML_KEM_768    = 1081,
+	ML_KEM_1024   = 1082,
 	/** KEM algorithms recommended by BSI, in PRIVATE USE */
 	KE_FRODO_AES_L1    = 1083,
 	KE_FRODO_AES_L3    = 1084,

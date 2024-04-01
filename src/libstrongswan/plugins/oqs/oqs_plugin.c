@@ -48,9 +48,9 @@ METHOD(plugin_t, get_features, int,
 	static plugin_feature_t f[] = {
 		/* KEM-based key exchange methods */
 		PLUGIN_REGISTER(KE, oqs_kem_create),
-			PLUGIN_PROVIDE(KE, KE_KYBER_L1),
-			PLUGIN_PROVIDE(KE, KE_KYBER_L3),
-			PLUGIN_PROVIDE(KE, KE_KYBER_L5),
+			PLUGIN_PROVIDE(KE, ML_KEM_512),
+			PLUGIN_PROVIDE(KE, ML_KEM_768),
+			PLUGIN_PROVIDE(KE, ML_KEM_1024),
 			PLUGIN_PROVIDE(KE, KE_FRODO_AES_L1),
 			PLUGIN_PROVIDE(KE, KE_FRODO_AES_L3),
 			PLUGIN_PROVIDE(KE, KE_FRODO_AES_L5),
